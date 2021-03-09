@@ -63,7 +63,6 @@ def local_grid_map(position, rotation, scanned_points, contacts, grid_size=80, h
         cells = np.transpose(line)
         for cell_x, cell_y in zip(cells[0], cells[1]):
             grid_map[cell_y, cell_x] = 0
-    print(free_cells)
     # update obstacles position in the grid
     grid_map[contact_i, contact_j] = 1
     

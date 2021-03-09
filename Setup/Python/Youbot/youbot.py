@@ -101,7 +101,7 @@ rightVel = 0  # Go sideways.
 rotateRightVel = 0  # Rotate.
 
 # First state of state machine
-fsm = 'rotateRight'
+fsm = 'exploring'
 print('Switching to state: ', fsm)
 
 # Get the initial position
@@ -158,18 +158,13 @@ while True:
                     # MERGE GRID_MAPS !!
 
                     ## Uncomment the following lines to plot the grid map
-                    #plt.imshow(np.flip(tmp_grid, axis=0)) # flip it to see it in the right angle
-                    #plt.colorbar()
-                    #plt.show()
+                    plt.imshow(np.flip(tmp_grid, axis=0)) # flip it to see it in the right angle
+                    plt.colorbar()
+                    plt.show()
                     
-                    fsm_exp = 'planning'
+                    fsm = 'finished'
+                    break
                 
-                elif fsm_exp == 'planning':
-                    unknown_boundaries = gm.get_unknown_boundaries(tmp_grid, free_cells)
-                    most_uncertain_cell = gm.get_most_uncertain_cell(grid_map, unknown_boundaries, 5)
-                    orthonormal_pos, grid_pos = gm.get_youbot_position(youbotPos, grid_size, house_size)
-                    # TODO: Compute the shortest path to the most uncertain cell 
-
 
         # Apply the state machine.
         elif fsm == 'forward':
@@ -231,18 +226,14 @@ while True:
                 print('Switching to state: ', fsm)
 
         elif fsm == 'finished':
-            rotateRightVel = 0
             print('Finish')
-            #time.sleep(3)
+            time.sleep(3)
             break
         else:
             sys.exit('Unknown state ' + fsm)
 
         # Update wheel velocities.
         h = youbot_drive(vrep, h, forwBackVel, rightVel, rotateRightVel)
-
-        res, youbotEuler = vrep.simxGetObjectOrientation(clientID, h['ref'], -1, vrep.simx_opmode_buffer)
-        print(youbotEuler)
 
         # What happens if you do not update the velocities?
         # The simulator always considers the last speed you gave it,

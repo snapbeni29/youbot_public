@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 from bresenham import bresenham
+import math
 
 GRID_WIDTH = 50
 
@@ -69,6 +70,8 @@ def local_grid_map(position, rotation, scanned_points, contacts, grid_size=GRID_
             grid_map[cell_y, cell_x] = 0
     # update obstacles position in the grid
     grid_map[contact_i, contact_j] = 1
+
+    free_cells = np.argwhere(grid_map == 0)
     
     ## Uncomment to see where the youbot is
     #grid_map[o_y_grid, o_x_grid] = 2
@@ -90,6 +93,81 @@ def cell_to_pos(cell, grid_size=GRID_WIDTH, house_size=15):
     y = cell[0] * cell_width + cell_width/2
     x = cell[1] * cell_width + cell_width/2
     return (x, y)
+
+def findBorders(map):
+    limit = len(map)
+    borders_coordinates = []
+    for i in range(len(map)):
+        for j in range(len(map[i])):
+            if map[i][j] == -1:
+                if i+1 < limit and map[i+1][j] == 0:
+                    borders_coordinates.append((j, i))
+                elif i+1 < limit and j+1 < limit and map[i+1][j+1] == 0:
+                    borders_coordinates.append((j, i))
+                elif i+1 < limit and j-1 >= 0 and map[i+1][j-1] == 0:
+                    borders_coordinates.append((j, i))
+                elif i-1 >= 0 and map[i-1][j] == 0:
+                    borders_coordinates.append((j, i))
+                elif i-1 >= 0 and j+1 < limit and map[i-1][j+1] == 0:
+                    borders_coordinates.append((j, i))
+                elif i-1 >= 0 and j-1 >= 0 and map[i-1][j-1] == 0:
+                    borders_coordinates.append((j, i))
+                elif j+1 < limit and map[i][j+1] == 0:
+                    borders_coordinates.append((j, i))
+                elif j-1 >= 0 and map[i][j-1] == 0:
+                    borders_coordinates.append((j, i))
+    """for e in borders_coordinates:
+        map[e[1]][e[0]] = 2
+    plt.imshow(np.flip(map, axis=0))
+    plt.colorbar()
+    plt.show()"""
+    return borders_coordinates
+
+def has_unexplored_neighbour(cell, grid):
+    min_x = cell[0]-1 if cell[0] > 0 else 0
+    max_x = cell[0]+2 if cell[0] < len(grid)-1 else len(grid)
+    min_y = cell[1]-1 if cell[1] > 0 else 0
+    max_y = cell[1]+2 if cell[1] < len(grid)-1 else len(grid)
+    neighbours = grid[min_x:max_x, min_y:max_y]
+    _min = np.min(neighbours)
+    return _min < 0.9
+        
+
+
+
+def get_unexplored_neighbour(cell, grid):
+    min_x = cell[0]-1 if cell[0] > 0 else 0
+    max_x = cell[0]+2 if cell[0] < len(grid)-1 else len(grid)
+    min_y = cell[1]-1 if cell[1] > 0 else 0
+    max_y = cell[1]+2 if cell[1] < len(grid)-1 else len(grid)
+    neighbours = grid[min_x:max_x, min_y:max_y]
+    _min = np.argmin(neighbours)
+    row = math.floor(_min/3)
+    col = _min % 3
+    return (cell[0]-1 + row, cell[1]-1 + col)  if neighbours[row][col] < 0.9 else None
+        
+
+
+def findClosestBorder(map, youbotX, youbotY):
+    # print(free_cells)
+    borders_coordinates = findBorders(map)
+    xy_closestBorderCoordinate = []
+    minDist = 999
+    for e in borders_coordinates:
+        dist = euclideanDistance(youbotX, youbotY, e[0], e[1])
+        if dist < minDist:
+            minDist = dist
+            xy_closestBorderCoordinate = [e[0], e[1]]
+    #print("Unknown boundaries : ")
+    # print(unknown_boundaries)
+    map[xy_closestBorderCoordinate[1]][xy_closestBorderCoordinate[0]] = 2
+    plt.imshow(np.flip(map, axis=0))
+    plt.colorbar()
+    plt.show()
+    return minDist, xy_closestBorderCoordinate
+
+
+
 
 """
 def get_unknown_boundaries(grid_map, free_cells):

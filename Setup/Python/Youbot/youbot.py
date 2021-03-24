@@ -133,6 +133,8 @@ route = []
 next_waypoint = None
 dist_to_waypoint = 999
 ten_last_waypoints = []
+known_borders = set()
+global_dilated = global_map
 # Start the demo. 
 while True:
     try:
@@ -176,31 +178,61 @@ while True:
                     # Get data from the hokuyo - return empty if data is not captured
                     scanned_points, contacts = youbot_hokuyo(vrep, h, vrep.simx_opmode_buffer)
 
+
                     # build the grid
                     start_time = time.time()
                     tmp_grid, free_cells = gm.local_grid_map(youbotPos, youbotEuler, scanned_points, contacts)
-                    
                     end_time = time.time()
                     #print('grid map generated in : (s) ', end_time - start_time)
-                    """
-                    if len(boundaries_to_visit) == 0:
-                        boundaries_to_visit = gm.get_unknown_boundaries(tmp_grid, free_cells)
-                    """
+
+
+                    tmp_dilated = np.zeros([GRID_WIDTH, GRID_WIDTH])
+                    obstacles_mask = (tmp_grid == 1)
+                    tmp_dilated[obstacles_mask] = 1
+                    tmp_dilated = ndimage.morphology.grey_dilation(
+                        tmp_dilated, size=(5, 5))
+                    unexplored_mask = (tmp_grid == -1)
+                    obstacles_mask = (tmp_dilated == 1)
+                    tmp_dilated[unexplored_mask] = -1
+                    tmp_dilated[obstacles_mask] = 1
+
+
+                    new_borders = set()
+                    for cell in free_cells:
+                        border = gm.get_unexplored_neighbour(cell, tmp_dilated)
+                        if border != None:
+                            new_borders.add(border)
+                    
+                    for border in new_borders:
+                        if global_dilated[border[0]][border[1]] < -0.9:
+                            known_borders.add(border)
+                    
+                    to_remove = []
+                    for border in known_borders:
+                        if tmp_grid[border[0]][border[1]] > -0.9:
+                            to_remove.append(border)
+                    for item in to_remove:
+                        known_borders.remove(item)
+                    
+                    # known_borders.remove(grid_pos)
+
+                    
                     # adding new knowledge to the global map
                     global_map = np.maximum.reduce([global_map, tmp_grid])
                     print('position in the grid:', grid_pos)
                     global_map[grid_pos[0]][grid_pos[1]] = 0
 
                     # create a grid where walls are dilated
-                    gridForDilation = np.zeros([GRID_WIDTH, GRID_WIDTH])
+                    global_dilated = np.zeros([GRID_WIDTH, GRID_WIDTH])
                     obstacles_mask = (global_map == 1)
-                    gridForDilation[obstacles_mask] = 1
-                    gridForDilation = ndimage.morphology.grey_dilation(
-                        gridForDilation, size=(4, 4))
+                    global_dilated[obstacles_mask] = 1
+                    global_dilated = ndimage.morphology.grey_dilation(
+                        global_dilated, size=(5, 5))
                     unexplored_mask = (global_map == -1)
-                    obstacles_mask = (gridForDilation == 1)
-                    gridForDilation[unexplored_mask] = -1
-                    gridForDilation[obstacles_mask] = 1
+                    obstacles_mask = (global_dilated == 1)
+                    global_dilated[unexplored_mask] = -1
+                    global_dilated[obstacles_mask] = 1
+
 
                     # plot the "real" grid
                     plt.imshow(np.flip(global_map, axis=0))
@@ -212,20 +244,23 @@ while True:
                 
                 elif fsm_exp == 'analyze_grid_map':
                     # find the nearest "uncertain" cell
-                    target_cell = pf.get_nearest_cell(gridForDilation, grid_pos)
+                    target_cell = pf.get_nearest_cell(known_borders, grid_pos)
                     print('target cell: ', target_cell)
                     # compute the path to this cell
-                    route = pf.astar(gridForDilation, grid_pos, (target_cell[0], target_cell[1]))
+                    route = pf.astar(global_dilated, grid_pos, (target_cell[0], target_cell[1]))
                     # if robot is stuck in walls (because of the dilation),
                     # go backward to the last waypoint which was in a free cell
-                    if not route:
+                    if route == False:
+                        print('route is False')
                         route = []
                         for wp_x, wp_y in ten_last_waypoints[::-1]:
                             route.append((wp_x, wp_y))
-                            if gridForDilation[wp_x][wp_y] < .9:
+                            if global_dilated[wp_x][wp_y] < .9:
                                 break
+                    else:
+                        print('route is not false :', route)
                     # plot dilated grid
-                    plt.imshow(np.flip(gridForDilation, axis=0)) # flip it to see it in the right angle
+                    plt.imshow(np.flip(global_dilated, axis=0)) # flip it to see it in the right angle
                     plt.colorbar()
                     plt.show()
 
@@ -241,19 +276,19 @@ while True:
                         fsm_exp = 'scanning'
                     else:
                         # otherwise, we have to find the next waypoint to go to
-                        route, next_waypoint = pf.next_waypoint(route, grid_pos, gridForDilation)
+                        route, next_waypoint = pf.next_waypoint(route, grid_pos, global_dilated)
                         dist_to_waypoint = 999
                         # if detecting walls between robot and first position of the path,
                         # it's probably because we are close to a wall
                         if next_waypoint == None:
                             # go point by point
+                            print('popping the first point')
                             next_waypoint = route.pop(0)
                         print('switch to state rotating')
                         fsm_exp = 'rotating'
                 elif fsm_exp == 'rotating':
                     # When we know where is the next waypoint, we first rotate
                     # to have the youbot in the youbot's north
-
                     # get the real position of the center of the waypoint's cell
                     x, y = gm.cell_to_pos(next_waypoint)
                     # compute the angles
@@ -283,10 +318,11 @@ while True:
                     if dist < .4 or dist > dist_to_waypoint:
                         forwBackVel = 0  # Stop the robot.
                         # the waypoint is reached, add it to the last 10 waypoints list
-                        ten_last_waypoints.append(next_waypoint)
-                        # keep only the last 10 waypoints
-                        if len(ten_last_waypoints) > 10:
-                            ten_last_waypoints.pop(0)
+                        if global_dilated[grid_pos[0]][grid_pos[1]] < 0.9:
+                            ten_last_waypoints.append(next_waypoint)
+                            # keep only the last 10 waypoints
+                            if len(ten_last_waypoints) > 10:
+                                ten_last_waypoints.pop(0)
                         # if the route is not finished, go to next waypoint
                         if len(route) != 0:
                             print('route (go to next waypoint)')

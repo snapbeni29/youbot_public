@@ -25,6 +25,13 @@ from beacon import beacon_init, youbot_beacon
 from utils_sim import angdiff
 import matplotlib.pyplot as plt
 import grid_map as gm
+import pathfinder as pf
+from scipy import ndimage
+
+
+GRID_WIDTH = 50
+
+
 
 # Test the python implementation of a youbot
 # Initiate the connection to the simulator.
@@ -115,6 +122,17 @@ for i in range(int(1./timestep)):
     vrep.simxSynchronousTrigger(clientID)
     vrep.simxGetPingTime(clientID)
 
+start = time.time()
+forward_counter = 0
+positions = []
+diff = []
+pos, grid_pos = gm.get_youbot_position(youbotPos)
+global_map = -np.ones((GRID_WIDTH, GRID_WIDTH))
+boundaries_to_visit = []
+route = []
+next_waypoint = None
+dist_to_waypoint = 999
+ten_last_waypoints = []
 # Start the demo. 
 while True:
     try:
@@ -125,6 +143,11 @@ while True:
         # Get the position and the orientation of the robot.
         res, youbotPos = vrep.simxGetObjectPosition(clientID, h['ref'], -1, vrep.simx_opmode_buffer)
         vrchk(vrep, res, True) # Check the return value from the previous V-REP call (res) and exit in case of error.
+        if len(diff) == 0:
+            diff.append(0)
+        else:
+            diff.append(youbotPos[0] - positions[-1])
+        positions.append(youbotPos[0])
         res, youbotEuler = vrep.simxGetObjectOrientation(clientID, h['ref'], -1, vrep.simx_opmode_buffer)
         vrchk(vrep, res, True)
 
@@ -136,39 +159,158 @@ while True:
         if fsm == 'exploring':
             fsm_exp = 'scanning'
             while True:
+                # get youbot rotation
+                res, youbotEuler = vrep.simxGetObjectOrientation(clientID, h['ref'], -1, vrep.simx_opmode_buffer)
+                vrchk(vrep, res)
+
+                # get youbot position
+                res, youbotPos = vrep.simxGetObjectPosition(clientID, h['ref'], -1, vrep.simx_opmode_buffer)
+                vrchk(vrep, res)
+
+                # get position (x, y) and grid_position (row, col)
+                # WARNING : row corresponds on the y axis on the plot
+                # and col corresponds to the x axis on the plot
+                pos, grid_pos = gm.get_youbot_position(youbotPos)
                 
                 if fsm_exp == 'scanning':
                     # Get data from the hokuyo - return empty if data is not captured
                     scanned_points, contacts = youbot_hokuyo(vrep, h, vrep.simx_opmode_buffer)
 
-                    # get youbot rotation
-                    res, youbotEuler = vrep.simxGetObjectOrientation(clientID, h['ref'], -1, vrep.simx_opmode_buffer)
-                    vrchk(vrep, res)
-
-                    # get youbot position
-                    res, youbotPos = vrep.simxGetObjectPosition(clientID, h['ref'], -1, vrep.simx_opmode_buffer)
-                    vrchk(vrep, res)
-
                     # build the grid
                     start_time = time.time()
                     tmp_grid, free_cells = gm.local_grid_map(youbotPos, youbotEuler, scanned_points, contacts)
+                    
                     end_time = time.time()
-                    print('grid map generated in : (s) ', end_time - start_time)
+                    #print('grid map generated in : (s) ', end_time - start_time)
+                    """
+                    if len(boundaries_to_visit) == 0:
+                        boundaries_to_visit = gm.get_unknown_boundaries(tmp_grid, free_cells)
+                    """
+                    # adding new knowledge to the global map
+                    global_map = np.maximum.reduce([global_map, tmp_grid])
+                    print('position in the grid:', grid_pos)
+                    global_map[grid_pos[0]][grid_pos[1]] = 0
 
-                    # MERGE GRID_MAPS !!
+                    # create a grid where walls are dilated
+                    gridForDilation = np.zeros([GRID_WIDTH, GRID_WIDTH])
+                    obstacles_mask = (global_map == 1)
+                    gridForDilation[obstacles_mask] = 1
+                    gridForDilation = ndimage.morphology.grey_dilation(
+                        gridForDilation, size=(4, 4))
+                    unexplored_mask = (global_map == -1)
+                    obstacles_mask = (gridForDilation == 1)
+                    gridForDilation[unexplored_mask] = -1
+                    gridForDilation[obstacles_mask] = 1
 
-                    ## Uncomment the following lines to plot the grid map
-                    plt.imshow(np.flip(tmp_grid, axis=0)) # flip it to see it in the right angle
+                    # plot the "real" grid
+                    plt.imshow(np.flip(global_map, axis=0))
                     plt.colorbar()
                     plt.show()
                     
-                    fsm = 'finished'
-                    break
+                    print('switching to state analyze_grid_map')
+                    fsm_exp = 'analyze_grid_map'
+                
+                elif fsm_exp == 'analyze_grid_map':
+                    # find the nearest "uncertain" cell
+                    target_cell = pf.get_nearest_cell(gridForDilation, grid_pos)
+                    print('target cell: ', target_cell)
+                    # compute the path to this cell
+                    route = pf.astar(gridForDilation, grid_pos, (target_cell[0], target_cell[1]))
+                    # if robot is stuck in walls (because of the dilation),
+                    # go backward to the last waypoint which was in a free cell
+                    if not route:
+                        route = []
+                        for wp_x, wp_y in ten_last_waypoints[::-1]:
+                            route.append((wp_x, wp_y))
+                            if gridForDilation[wp_x][wp_y] < .9:
+                                break
+                    # plot dilated grid
+                    plt.imshow(np.flip(gridForDilation, axis=0)) # flip it to see it in the right angle
+                    plt.colorbar()
+                    plt.show()
+
+                    # reverse the route
+                    route = route[::-1]
+                    print(route)
+                    fsm_exp = 'get_next_waypoint'
+                elif fsm_exp == 'get_next_waypoint':
+                    # if the route is empty, we are arrived to the destination
+                    # we have to scan again
+                    if len(route) == 0:
+                        print('switch to state scanning')
+                        fsm_exp = 'scanning'
+                    else:
+                        # otherwise, we have to find the next waypoint to go to
+                        route, next_waypoint = pf.next_waypoint(route, grid_pos, gridForDilation)
+                        dist_to_waypoint = 999
+                        # if detecting walls between robot and first position of the path,
+                        # it's probably because we are close to a wall
+                        if next_waypoint == None:
+                            # go point by point
+                            next_waypoint = route.pop(0)
+                        print('switch to state rotating')
+                        fsm_exp = 'rotating'
+                elif fsm_exp == 'rotating':
+                    # When we know where is the next waypoint, we first rotate
+                    # to have the youbot in the youbot's north
+
+                    # get the real position of the center of the waypoint's cell
+                    x, y = gm.cell_to_pos(next_waypoint)
+                    # compute the angles
+                    desired_angle = np.arctan2(y - pos[1], x - pos[0]) + np.pi/2
+                    # print(desired_angle)
+                    forwBackVel = 0
+                    rightVel = 0
+                    rotateRightVel = angdiff(youbotEuler[2], desired_angle)
+                    if abs(angdiff(youbotEuler[2], desired_angle)) < 0.02:
+                        # rotate the youbot until the desired angle is reached
+                        rotateRightVel = 0
+                        res, youbotEuler = vrep.simxGetObjectOrientation(clientID, h['ref'], -1, vrep.simx_opmode_buffer)
+                        fsm_exp = 'forward'
+                        print('switching to state forward')
+                elif fsm_exp == 'forward':
+                    # once the robot is turned in the right direction,
+                    # go forward until the destination is reached
+                    forwBackVel = -1
+                    # compute the distance between the youbot and the waypoint
+                    dist = pf.heuristic(pos, gm.cell_to_pos(next_waypoint))
+                    # print(next_waypoint)
+                    # print(dist)
+                    # print(dist_to_waypoint)
+
+                    # if the youbot is really close to the waypoint
+                    # or the distance between them is not decreasing anymore, stop the youbot
+                    if dist < .4 or dist > dist_to_waypoint:
+                        forwBackVel = 0  # Stop the robot.
+                        # the waypoint is reached, add it to the last 10 waypoints list
+                        ten_last_waypoints.append(next_waypoint)
+                        # keep only the last 10 waypoints
+                        if len(ten_last_waypoints) > 10:
+                            ten_last_waypoints.pop(0)
+                        # if the route is not finished, go to next waypoint
+                        if len(route) != 0:
+                            print('route (go to next waypoint)')
+                            print(route)
+                            fsm_exp = 'get_next_waypoint'
+                        else:
+                            # if the route is finished, start scanning again
+                            print("empty route, go to scanning")
+                            global_map[next_waypoint[0]][next_waypoint[1]] = 0
+                            fsm_exp = 'scanning'
+                    # update the last distance to the waypoint
+                    if dist < dist_to_waypoint:
+                        dist_to_waypoint = dist
+
+                # move the youbot
+                h = youbot_drive(vrep, h, forwBackVel, rightVel, rotateRightVel)
+
+                vrep.simxSynchronousTrigger(clientID)
+                vrep.simxGetPingTime(clientID)
                 
 
         # Apply the state machine.
         elif fsm == 'forward':
-
+            
             # Make the robot drive with a constant speed (very simple controller, likely to overshoot). 
             # The speed is - 1 m/s, the sign indicating the direction to follow. Please note that the robot has
             # limitations and cannot reach an infinite speed. 
@@ -178,9 +320,15 @@ while True:
             # small, the condition will never be met (the robot position is updated every 50 ms); if it is too large,
             # then the robot is not close enough to the position (which may be a problem if it has to pick an object,
             # for example). 
-            if abs(youbotPos[0] + 6.5) < .02:
+            if abs(youbotPos[0] + 2) < .02:
                 forwBackVel = 0  # Stop the robot.
-                fsm = 'backward'
+                fsm = 'finished'
+                end = time.time()
+                print('time: ', end - start)
+                print('positions:')
+                print(positions)
+                print('differences:')
+                print(diff)
                 print('Switching to state: ', fsm)
 
 
